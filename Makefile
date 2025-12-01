@@ -11,7 +11,6 @@ help:
 	@echo "  api          Run API locally"
 	@echo "  dashboard    Run dashboard locally"
 	@echo "  init-dvc     Initialize DVC with datasets"
-	@echo "  demo         Run full demonstration"
 	@echo "  clearml      Open ClearML web interface"
 	@echo "  minio        Open MinIO web interface"
 	@echo "  status       Show service status and URLs"
@@ -53,10 +52,6 @@ init-dvc:
 	@echo "Initializing DVC with datasets..."
 	python scripts/init_dvc.py
 
-demo:
-	@echo "Running full demonstration..."
-	python demo.py
-
 clearml:
 	@echo "Opening ClearML web interface..."
 	@powershell -Command "Start-Process 'http://localhost:8080'"
@@ -78,4 +73,5 @@ full-setup: init-dvc build up status
 	@echo "Wait a moment and run 'make test' to verify everything is working"
 
 .PHONY: all
+
 all: build up status

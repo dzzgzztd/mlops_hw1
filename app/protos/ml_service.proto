@@ -1,0 +1,153 @@
+syntax = "proto3";
+
+package ml_service;
+
+// Сервис для работы с ML моделями
+service MLService {
+  // Health check
+  rpc HealthCheck (HealthRequest) returns (HealthResponse);
+
+  // Получение списка доступных моделей
+  rpc GetAvailableModels (AvailableModelsRequest) returns (AvailableModelsResponse);
+
+  // Обучение модели
+  rpc TrainModel (TrainModelRequest) returns (TrainModelResponse);
+
+  // Получение списка обученных моделей
+  rpc ListModels (ListModelsRequest) returns (ListModelsResponse);
+
+  // Получение информации о модели
+  rpc GetModelInfo (ModelInfoRequest) returns (ModelInfoResponse);
+
+  // Предсказание
+  rpc Predict (PredictRequest) returns (PredictResponse);
+
+  // Переобучение модели
+  rpc RetrainModel (RetrainModelRequest) returns (RetrainModelResponse);
+
+  // Удаление модели
+  rpc DeleteModel (DeleteModelRequest) returns (DeleteModelResponse);
+
+  // Список датасетов
+  rpc ListDatasets (ListDatasetsRequest) returns (ListDatasetsResponse);
+}
+
+// Сообщения для запросов и ответов
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+  string message = 2;
+  string timestamp = 3;
+}
+
+message AvailableModelsRequest {}
+
+message ModelHyperparameters {
+  map<string, string> parameters = 1;
+}
+
+message ModelInfo {
+  string model_type = 1;
+  ModelHyperparameters default_hyperparameters = 2;
+  string description = 3;
+}
+
+message AvailableModelsResponse {
+  string status = 1;
+  map<string, ModelInfo> available_models = 2;
+  string error = 3;
+}
+
+message TrainModelRequest {
+  string model_type = 1;
+  map<string, string> hyperparameters = 2;
+}
+
+message TrainModelResponse {
+  string status = 1;
+  string model_id = 2;
+  string model_type = 3;
+  map<string, string> hyperparameters = 4;
+  float train_accuracy = 5;
+  string model_path = 6;
+  string error = 7;
+}
+
+message ListModelsRequest {}
+
+message ModelSummary {
+  string model_id = 1;
+  string model_type = 2;
+  bool is_trained = 3;
+}
+
+message ListModelsResponse {
+  string status = 1;
+  repeated ModelSummary models = 2;
+  int32 count = 3;
+  string error = 4;
+}
+
+message ModelInfoRequest {
+  string model_id = 1;
+}
+
+message ModelInfoResponse {
+  string status = 1;
+  string model_id = 2;
+  string model_type = 3;
+  bool is_trained = 4;
+  string error = 5;
+}
+
+message PredictRequest {
+  string model_id = 1;
+  repeated DataRow data = 2;
+}
+
+message DataRow {
+  repeated float features = 1;
+}
+
+message PredictResponse {
+  string status = 1;
+  string model_id = 2;
+  string model_type = 3;
+  repeated int32 predictions = 4;
+  string error = 5;
+}
+
+message RetrainModelRequest {
+  string model_id = 1;
+  map<string, string> hyperparameters = 2;
+}
+
+message RetrainModelResponse {
+  string status = 1;
+  string model_id = 2;
+  string model_type = 3;
+  map<string, string> hyperparameters = 4;
+  float train_accuracy = 5;
+  string error = 6;
+}
+
+message DeleteModelRequest {
+  string model_id = 1;
+}
+
+message DeleteModelResponse {
+  string status = 1;
+  string message = 2;
+  string error = 3;
+}
+
+message ListDatasetsRequest {}
+
+message ListDatasetsResponse {
+  string status = 1;
+  repeated string datasets = 2;
+  int32 count = 3;
+  string error = 4;
+}

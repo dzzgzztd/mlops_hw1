@@ -1,0 +1,110 @@
+version: '3.8'
+
+services:
+  ml-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ml-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./saved_models:/app/saved_models
+      - ./logs:/app/logs
+      - ./data:/app/data
+    environment:
+      - PYTHONPATH=/app
+    restart: unless-stopped
+
+  ml-dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: ml-dashboard
+    ports:
+      - "7860:7860"
+    environment:
+      - API_BASE_URL=http://ml-api:8000/api/v1
+    depends_on:
+      - ml-api
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:4.4
+    container_name: mongodb
+    volumes:
+      - mongodb_data:/data/db
+    restart: unless-stopped
+
+  redis:
+    image: redis:6-alpine
+    container_name: redis
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  clearml-apiserver:
+    image: allegroai/clearml:latest
+    container_name: clearml-apiserver
+    ports:
+      - "8008:8008"
+    environment:
+      - CLEARML_API_HOST=0.0.0.0:8008
+      - CLEARML_FILES_HOST=clearml-fileserver:8081
+      - CLEARML_WEB_HOST=clearml-webserver:8080
+    depends_on:
+      - mongodb
+      - redis
+    command: ["clearml-apiserver"]
+    restart: unless-stopped
+
+  clearml-webserver:
+    image: allegroai/clearml:latest
+    container_name: clearml-webserver
+    ports:
+      - "8080:8080"
+    environment:
+      - CLEARML_API_HOST=clearml-apiserver:8008
+      - CLEARML_FILES_HOST=clearml-fileserver:8081
+      - CLEARML_WEB_HOST=0.0.0.0:8080
+    depends_on:
+      - mongodb
+      - redis
+      - clearml-apiserver
+    command: ["clearml-webserver"]
+    restart: unless-stopped
+
+  clearml-fileserver:
+    image: allegroai/clearml:latest
+    container_name: clearml-fileserver
+    ports:
+      - "8081:8081"
+    environment:
+      - CLEARML_API_HOST=clearml-apiserver:8008
+      - CLEARML_FILES_HOST=0.0.0.0:8081
+      - CLEARML_WEB_HOST=clearml-webserver:8080
+    depends_on:
+      - mongodb
+      - redis
+      - clearml-apiserver
+    command: ["clearml-fileserver"]
+    restart: unless-stopped
+
+volumes:
+  minio_data:
+  mongodb_data:
+  redis_data:

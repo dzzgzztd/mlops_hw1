@@ -17,7 +17,8 @@ services:
       CLEARML_WEB_HOST: http://webserver:80
       CLEARML_FILES_HOST: http://fileserver:8081
       CLEARML_PROJECT: ML-Service
-      CLEARML_OUTPUT_URI: s3://clearml-artifacts
+      CLEARML_OUTPUT_URI: s3://minio:9000/clearml-artifacts
+
       CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY}
       CLEARML_API_SECRET_KEY: ${CLEARML_API_SECRET_KEY}
 
@@ -25,6 +26,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       AWS_DEFAULT_REGION: us-east-1
       S3_ENDPOINT_URL: http://minio:9000
+      AWS_S3_ENDPOINT: http://minio:9000
       DVC_S3_BUCKET: dvc-storage
     depends_on:
       - minio

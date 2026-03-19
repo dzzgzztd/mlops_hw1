@@ -6,14 +6,8 @@ logger = logging.getLogger(__name__)
 
 
 class ClearMLService:
-    """Сервис для интеграции с ClearML"""
-
     def __init__(self) -> None:
         self.is_configured = self._is_env_configured()
-        if self.is_configured:
-            logger.info("ClearML configured via environment variables")
-        else:
-            logger.warning("ClearML env vars are missing, integration disabled")
 
     @staticmethod
     def _is_env_configured() -> bool:
@@ -32,7 +26,6 @@ class ClearMLService:
         hyperparameters: Dict[str, Any],
         dataset_name: Optional[str] = None,
     ) -> Optional[Any]:
-        """Создание эксперимента в ClearML"""
         if not self.is_configured:
             logger.warning("ClearML is not configured")
             return None
@@ -44,22 +37,36 @@ class ClearMLService:
             return None
 
         try:
-            output_uri = os.getenv("CLEARML_OUTPUT_URI")
-
-            task = Task.init(
+            task = Task.create(
                 project_name=os.getenv("CLEARML_PROJECT", "ML-Service"),
                 task_name=f"{model_type}_training",
-                tags=[model_type, "automated"],
-                reuse_last_task_id=False,
-                output_uri=output_uri,
+                task_type=Task.TaskTypes.training,
             )
 
-            task.connect(hyperparameters, name="hyperparameters")
+            task.add_tags([model_type, "automated"])
 
             if dataset_name:
-                task.set_parameter("dataset_name", dataset_name)
+                task.set_parameter("General/dataset_name", dataset_name)
 
-            logger.info("ClearML experiment created: %s", getattr(task, "id", None))
+            for key, value in hyperparameters.items():
+                task.set_parameter(f"Hyperparameters/{key}", value)
+
+            output_uri = os.getenv("CLEARML_OUTPUT_URI")
+            if output_uri:
+                try:
+                    task.output_uri = output_uri
+                    logger.info("ClearML output_uri configured: %s", output_uri)
+                except Exception as e:
+                    logger.warning(
+                        "Could not configure ClearML output_uri=%s: %s",
+                        output_uri,
+                        e,
+                    )
+
+            # ВАЖНО: переводим draft -> in_progress
+            task.started(force=True)
+
+            logger.info("ClearML experiment created: %s", task.id)
             return task
 
         except Exception as e:
@@ -72,31 +79,18 @@ class ClearMLService:
         metrics: Dict[str, float],
         iteration: int = 0,
     ) -> None:
-        """Логирование метрик в ClearML"""
-        if not self.is_configured or task is None:
+        if task is None:
             return
 
         try:
             task_logger = task.get_logger()
             for metric_name, metric_value in metrics.items():
-                try:
-                    value = float(metric_value)
-                except (TypeError, ValueError):
-                    logger.warning(
-                        "Metric %s=%r cannot be converted to float, skipped",
-                        metric_name,
-                        metric_value,
-                    )
-                    continue
-
                 task_logger.report_scalar(
                     title="metrics",
                     series=metric_name,
-                    value=value,
+                    value=float(metric_value),
                     iteration=iteration,
                 )
-
-            logger.info("Metrics logged to ClearML")
         except Exception as e:
             logger.exception("Failed to log metrics to ClearML: %s", e)
 
@@ -107,17 +101,12 @@ class ClearMLService:
         model_name: str,
         metrics: Optional[Dict[str, float]] = None,
     ) -> None:
-        """Регистрация модели в ClearML"""
-        if not self.is_configured or task is None:
+        if task is None:
             return
 
         try:
             from clearml import OutputModel
-        except Exception as e:
-            logger.error("Failed to import ClearML OutputModel: %s", e)
-            return
 
-        try:
             output_model = OutputModel(
                 task=task,
                 name=model_name,
@@ -131,28 +120,25 @@ class ClearMLService:
                 )
 
             output_model.update_weights(weights_filename=model_path)
-
             logger.info("Model registered in ClearML: %s", model_name)
         except Exception as e:
             logger.exception("Failed to register model in ClearML: %s", e)
 
-    def finalize_task(self, task: Any, status: str = "completed") -> None:
-        if not self.is_configured or task is None:
+    def finalize_task(self, task: Any, failed: bool = False) -> None:
+        if task is None:
             return
 
         try:
-            if status == "failed":
-                try:
-                    task.mark_failed(status_reason="Training failed")
-                except Exception:
-                    pass
-            else:
-                try:
-                    task.mark_completed()
-                except Exception:
-                    pass
+            task.flush(wait_for_uploads=True)
+        except Exception:
+            logger.exception("Failed to flush ClearML task")
 
-            task.close()
+        try:
+            if failed:
+                task.mark_failed(status_reason="Training failed", force=True)
+            else:
+                task.mark_completed(force=True)
+                task.close()
             logger.info("ClearML task finalized: %s", getattr(task, "id", None))
         except Exception as e:
             logger.exception("Failed to finalize ClearML task: %s", e)

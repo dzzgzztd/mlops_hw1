@@ -1,18 +1,24 @@
-import grpc
-from concurrent import futures
-import numpy as np
-from datetime import datetime
 import os
 import sys
+from concurrent import futures
+from datetime import datetime
+import grpc
+import numpy as np
 
-# Добавляем путь к корню проекта для корректных импортов
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.core.exceptions import (
+    DatasetLoadError,
+    DatasetNotFoundError,
+    ModelDeleteError,
+    ModelNotFoundError,
+    PredictionError,
+    TrainingError,
+)
 from app.grpc.generated import ml_service_pb2, ml_service_pb2_grpc
+from app.services.dataset_service import DatasetService
 from app.services.model_service import ModelService
-from app.core.data_generator import SAMPLE_X, SAMPLE_Y
-
-from app.core.logger import setup_logger
+from app.utils.logger import setup_logger
 
 logger = setup_logger("ml_service_grpc", "INFO")
 
@@ -25,92 +31,73 @@ class MLServiceServicer(ml_service_pb2_grpc.MLServiceServicer):
         models_dir = os.path.join(project_root, "saved_models")
 
         self.model_service = ModelService(models_dir=models_dir)
+        self.dataset_service = DatasetService()
         logger.info("gRPC MLServiceServicer инициализирован")
 
     def HealthCheck(self, request, context):
-        """Health check эндпоинт"""
         logger.info("gRPC HealthCheck called")
         return ml_service_pb2.HealthResponse(
             status="healthy",
             message="gRPC ML Service is running",
-            timestamp=datetime.now().isoformat()
+            timestamp=datetime.now().isoformat(),
         )
 
     def GetAvailableModels(self, request, context):
-        """Получение списка доступных моделей"""
         try:
             logger.info("gRPC GetAvailableModels called")
             result = self.model_service.get_available_models()
 
-            if result["status"] == "error":
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(result["error"])
-                return ml_service_pb2.AvailableModelsResponse(
-                    status="error",
-                    error=result["error"]
-                )
-
-            # Конвертируем результат в gRPC формат
             available_models = {}
             for model_type, model_info in result["available_models"].items():
-                # Конвертируем значения гиперпараметров в строки для gRPC
-                str_hyperparams = {k: str(v) for k, v in model_info["default_hyperparameters"].items()}
+                str_hyperparams = {
+                    k: str(v)
+                    for k, v in model_info["default_hyperparameters"].items()
+                }
                 hyperparams = ml_service_pb2.ModelHyperparameters(
                     parameters=str_hyperparams
                 )
                 available_models[model_type] = ml_service_pb2.ModelInfo(
                     model_type=model_type,
                     default_hyperparameters=hyperparams,
-                    description=model_info["description"]
+                    description=model_info["description"],
                 )
 
             return ml_service_pb2.AvailableModelsResponse(
                 status="success",
-                available_models=available_models
+                available_models=available_models,
             )
 
         except Exception as e:
-            logger.error(f"Error in gRPC GetAvailableModels: {str(e)}")
+            logger.exception("Error in gRPC GetAvailableModels: %s", e)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return ml_service_pb2.AvailableModelsResponse(
                 status="error",
-                error=str(e)
+                error=str(e),
             )
 
     def TrainModel(self, request, context):
-        """Обучение модели"""
         try:
-            logger.info(f"gRPC TrainModel called: {request.model_type}")
+            logger.info("gRPC TrainModel called: %s", request.model_type)
 
-            # Конвертируем гиперпараметры
             hyperparameters = {
                 k: self._convert_hyperparameter_value(v)
                 for k, v in request.hyperparameters.items()
             }
 
-            # Обучаем модель
+            dataset_name = request.dataset_name if request.dataset_name else None
+
             result = self.model_service.train_model(
                 model_type=request.model_type,
-                X=SAMPLE_X,
-                y=SAMPLE_Y,
-                hyperparameters=hyperparameters
+                dataset_name=dataset_name,
+                hyperparameters=hyperparameters,
             )
 
-            if result["status"] == "error":
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(result["error"])
-                return ml_service_pb2.TrainModelResponse(
-                    status="error",
-                    error=result["error"]
-                )
-
-            # Конвертируем гиперпараметры обратно в строки для gRPC
             str_hyperparams = {
                 k: str(v) for k, v in result["hyperparameters"].items()
             }
 
-            logger.info(f"Model trained successfully: {result['model_id']}")
+            logger.info("Model trained successfully: %s", result["model_id"])
 
             return ml_service_pb2.TrainModelResponse(
                 status="success",
@@ -118,248 +105,227 @@ class MLServiceServicer(ml_service_pb2_grpc.MLServiceServicer):
                 model_type=result["model_type"],
                 hyperparameters=str_hyperparams,
                 train_accuracy=result.get("train_accuracy", 0.0),
-                model_path=result.get("model_path", "")
+                model_path=result.get("model_path", ""),
             )
+
+        except DatasetNotFoundError as e:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(str(e))
+            return ml_service_pb2.TrainModelResponse(status="error", error=str(e))
+
+        except (DatasetLoadError, TrainingError, ValueError) as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return ml_service_pb2.TrainModelResponse(status="error", error=str(e))
 
         except Exception as e:
-            logger.error(f"Error in gRPC TrainModel: {str(e)}")
+            logger.exception("Error in gRPC TrainModel: %s", e)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
-            return ml_service_pb2.TrainModelResponse(
-                status="error",
-                error=str(e)
-            )
+            return ml_service_pb2.TrainModelResponse(status="error", error=str(e))
 
     def ListModels(self, request, context):
-        """Список обученных моделей"""
         try:
             logger.info("gRPC ListModels called")
             result = self.model_service.list_models()
 
-            if result["status"] == "error":
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(result["error"])
-                return ml_service_pb2.ListModelsResponse(
-                    status="error",
-                    error=result["error"]
-                )
-
-            # Конвертируем модели
             models = []
             for model in result["models"]:
-                models.append(ml_service_pb2.ModelSummary(
-                    model_id=model["model_id"],
-                    model_type=model["model_type"],
-                    is_trained=model["is_trained"]
-                ))
-
-            logger.info(f"Returning {len(models)} models")
+                models.append(
+                    ml_service_pb2.ModelSummary(
+                        model_id=model["model_id"],
+                        model_type=model["model_type"],
+                        is_trained=model["is_trained"],
+                    )
+                )
 
             return ml_service_pb2.ListModelsResponse(
                 status="success",
                 models=models,
-                count=result["count"]
+                count=result["count"],
             )
 
         except Exception as e:
-            logger.error(f"Error in gRPC ListModels: {str(e)}")
+            logger.exception("Error in gRPC ListModels: %s", e)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return ml_service_pb2.ListModelsResponse(
                 status="error",
-                error=str(e)
+                error=str(e),
             )
 
     def GetModelInfo(self, request, context):
-        """Информация о модели"""
         try:
-            logger.info(f"gRPC GetModelInfo called: {request.model_id}")
+            logger.info("gRPC GetModelInfo called: %s", request.model_id)
             result = self.model_service.get_model_info(request.model_id)
 
-            if result["status"] == "error":
-                context.set_code(grpc.StatusCode.NOT_FOUND)
-                context.set_details(result["error"])
-                return ml_service_pb2.ModelInfoResponse(
-                    status="error",
-                    error=result["error"]
-                )
-
             return ml_service_pb2.ModelInfoResponse(
                 status="success",
                 model_id=result["model_id"],
                 model_type=result["model_type"],
-                is_trained=result["is_trained"]
+                is_trained=result["is_trained"],
             )
 
+        except ModelNotFoundError as e:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(str(e))
+            return ml_service_pb2.ModelInfoResponse(status="error", error=str(e))
+
         except Exception as e:
-            logger.error(f"Error in gRPC GetModelInfo: {str(e)}")
+            logger.exception("Error in gRPC GetModelInfo: %s", e)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
-            return ml_service_pb2.ModelInfoResponse(
-                status="error",
-                error=str(e)
-            )
+            return ml_service_pb2.ModelInfoResponse(status="error", error=str(e))
 
     def Predict(self, request, context):
-        """Предсказание"""
         try:
-            logger.info(f"gRPC Predict called: {request.model_id}")
+            logger.info("gRPC Predict called: %s", request.model_id)
 
             X = np.array([[feature for feature in row.features] for row in request.data])
-
             result = self.model_service.get_prediction(request.model_id, X)
-
-            if result["status"] == "error":
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(result["error"])
-                return ml_service_pb2.PredictResponse(
-                    status="error",
-                    error=result["error"]
-                )
-
-            logger.info(f"Prediction successful for model: {request.model_id}")
 
             return ml_service_pb2.PredictResponse(
                 status="success",
                 model_id=result["model_id"],
                 model_type=result["model_type"],
-                predictions=result["predictions"]
+                predictions=result["predictions"],
             )
+
+        except ModelNotFoundError as e:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(str(e))
+            return ml_service_pb2.PredictResponse(status="error", error=str(e))
+
+        except PredictionError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return ml_service_pb2.PredictResponse(status="error", error=str(e))
 
         except Exception as e:
-            logger.error(f"Error in gRPC Predict: {str(e)}")
+            logger.exception("Error in gRPC Predict: %s", e)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
-            return ml_service_pb2.PredictResponse(
-                status="error",
-                error=str(e)
-            )
+            return ml_service_pb2.PredictResponse(status="error", error=str(e))
 
     def RetrainModel(self, request, context):
-        """Переобучение модели"""
         try:
-            logger.info(f"gRPC RetrainModel called: {request.model_id}")
+            logger.info("gRPC RetrainModel called: %s", request.model_id)
 
-            # Конвертируем гиперпараметры
             hyperparameters = {
                 k: self._convert_hyperparameter_value(v)
                 for k, v in request.hyperparameters.items()
             }
 
+            dataset_name = request.dataset_name if request.dataset_name else None
+
             result = self.model_service.retrain_model(
                 model_id=request.model_id,
-                X=SAMPLE_X,
-                y=SAMPLE_Y,
-                hyperparameters=hyperparameters
+                dataset_name=dataset_name,
+                hyperparameters=hyperparameters,
             )
 
-            if result["status"] == "error":
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(result["error"])
-                return ml_service_pb2.RetrainModelResponse(
-                    status="error",
-                    error=result["error"]
-                )
-
-            # Конвертируем гиперпараметры обратно в строки для gRPC
             str_hyperparams = {
                 k: str(v) for k, v in result["hyperparameters"].items()
             }
-
-            logger.info(f"Model retrained successfully: {request.model_id}")
 
             return ml_service_pb2.RetrainModelResponse(
                 status="success",
                 model_id=result["model_id"],
                 model_type=result["model_type"],
                 hyperparameters=str_hyperparams,
-                train_accuracy=result.get("train_accuracy", 0.0)
+                train_accuracy=result.get("train_accuracy", 0.0),
             )
+
+        except ModelNotFoundError as e:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(str(e))
+            return ml_service_pb2.RetrainModelResponse(status="error", error=str(e))
+
+        except DatasetNotFoundError as e:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(str(e))
+            return ml_service_pb2.RetrainModelResponse(status="error", error=str(e))
+
+        except (DatasetLoadError, TrainingError, ValueError) as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return ml_service_pb2.RetrainModelResponse(status="error", error=str(e))
 
         except Exception as e:
-            logger.error(f"Error in gRPC RetrainModel: {str(e)}")
+            logger.exception("Error in gRPC RetrainModel: %s", e)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
-            return ml_service_pb2.RetrainModelResponse(
-                status="error",
-                error=str(e)
-            )
+            return ml_service_pb2.RetrainModelResponse(status="error", error=str(e))
 
     def DeleteModel(self, request, context):
-        """Удаление модели"""
         try:
-            logger.info(f"gRPC DeleteModel called: {request.model_id}")
+            logger.info("gRPC DeleteModel called: %s", request.model_id)
             result = self.model_service.delete_model(request.model_id)
-
-            if result["status"] == "error":
-                context.set_code(grpc.StatusCode.NOT_FOUND)
-                context.set_details(result["error"])
-                return ml_service_pb2.DeleteModelResponse(
-                    status="error",
-                    error=result["error"]
-                )
-
-            logger.info(f"Model deleted successfully: {request.model_id}")
 
             return ml_service_pb2.DeleteModelResponse(
                 status="success",
-                message=result["message"]
+                message=result["message"],
             )
+
+        except ModelNotFoundError as e:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(str(e))
+            return ml_service_pb2.DeleteModelResponse(status="error", error=str(e))
+
+        except ModelDeleteError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return ml_service_pb2.DeleteModelResponse(status="error", error=str(e))
 
         except Exception as e:
-            logger.error(f"Error in gRPC DeleteModel: {str(e)}")
+            logger.exception("Error in gRPC DeleteModel: %s", e)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
-            return ml_service_pb2.DeleteModelResponse(
-                status="error",
-                error=str(e)
-            )
+            return ml_service_pb2.DeleteModelResponse(status="error", error=str(e))
 
     def ListDatasets(self, request, context):
-        """Список датасетов"""
         try:
             logger.info("gRPC ListDatasets called")
 
-            datasets = ["iris", "wine", "breast_cancer", "digits"]
+            result = self.dataset_service.list_datasets()
+            datasets = [dataset["name"] for dataset in result["datasets"]]
 
             return ml_service_pb2.ListDatasetsResponse(
                 status="success",
                 datasets=datasets,
-                count=len(datasets)
+                count=result["count"],
             )
 
         except Exception as e:
-            logger.error(f"Error in gRPC ListDatasets: {str(e)}")
+            logger.exception("Error in gRPC ListDatasets: %s", e)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return ml_service_pb2.ListDatasetsResponse(
                 status="error",
-                error=str(e)
+                error=str(e),
             )
 
-    def _convert_hyperparameter_value(self, value: str):
-        """Конвертирует строковые значения гиперпараметров в правильные типы"""
+    @staticmethod
+    def _convert_hyperparameter_value(value: str):
         try:
             return int(value)
         except ValueError:
             try:
                 return float(value)
             except ValueError:
-                # Оставляем как строку, если не удалось конвертировать
                 return value
 
 
 def serve():
-    """Запуск gRPC сервера"""
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    ml_service_pb2_grpc.add_MLServiceServicer_to_server(MLServiceServicer(), server)
+    ml_service_pb2_grpc.add_MLServiceServicer_to_server(
+        MLServiceServicer(), server
+    )
 
-    # Порт для gRPC
     port = "50051"
     server.add_insecure_port(f"[::]:{port}")
-
     server.start()
-    logger.info(f"gRPC Server started on port {port}")
+    logger.info("gRPC Server started on port %s", port)
 
     try:
         server.wait_for_termination()

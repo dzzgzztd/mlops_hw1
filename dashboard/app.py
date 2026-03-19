@@ -2,13 +2,13 @@ import os
 import gradio as gr
 import requests
 import json
-from typing import Dict
+from typing import Dict, Any, List, Tuple
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-API_BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:8000/api/v1')
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
 
 
 class MLDashboard:
@@ -16,84 +16,99 @@ class MLDashboard:
 
     def __init__(self, api_base_url: str = API_BASE_URL):
         self.api_base_url = api_base_url
-        self.current_models = []
-        self.available_models = {}
-        self.datasets = []
+        self.current_models: List[Dict[str, Any]] = []
+        self.available_models: Dict[str, Any] = {}
+        self.datasets: List[Dict[str, Any]] = []
 
     def _make_api_request(self, endpoint: str, method: str = "GET", data: Dict = None) -> Dict:
         """Вспомогательный метод для API запросов"""
         url = f"{self.api_base_url}{endpoint}"
         try:
             if method == "GET":
-                response = requests.get(url)
+                response = requests.get(url, timeout=30)
             elif method == "POST":
-                response = requests.post(url, json=data)
+                response = requests.post(url, json=data, timeout=60)
             elif method == "PUT":
-                response = requests.put(url, json=data)
+                response = requests.put(url, json=data, timeout=60)
             elif method == "DELETE":
-                response = requests.delete(url)
+                response = requests.delete(url, timeout=30)
             else:
                 return {"status": "error", "error": f"Unsupported method: {method}"}
 
             if response.status_code == 200:
-                return response.json()
-            else:
-                return {"status": "error", "error": f"HTTP {response.status_code}: {response.text}"}
+                result = response.json()
+                if isinstance(result, dict) and "status" not in result:
+                    result["status"] = "success"
+                return result
+
+            return {"status": "error", "error": f"HTTP {response.status_code}: {response.text}"}
 
         except requests.exceptions.ConnectionError:
-            return {"status": "error",
-                    "error": "Cannot connect to API server. Make sure it's running on localhost:8000"}
+            return {
+                "status": "error",
+                "error": f"Cannot connect to API server. Make sure it's running on {self.api_base_url}",
+            }
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
+    def _extract_model_choices(self, models: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
+        """Готовит choices для dropdown: label показываем, value = model_id"""
+        choices = []
+        for model in models:
+            model_id = model.get("model_id")
+            model_type = model.get("model_type", "unknown")
+            if model_id:
+                label = f"{model_type} ({model_id})"
+                choices.append((label, model_id))
+        return choices
+
+    def _extract_dataset_names(self, datasets: List[Dict[str, Any]]) -> List[str]:
+        names = []
+        for dataset in datasets:
+            name = dataset.get("name")
+            if name:
+                names.append(name)
+        return names
+
     def health_check(self) -> str:
-        """Проверка статуса сервиса"""
         result = self._make_api_request("/health")
-        if result.get("status") == "healthy":
+        if result.get("status") in ("healthy", "success"):
             return "Сервис работает нормально"
-        else:
-            return f"Ошибка: {result.get('error', 'Unknown error')}"
+        return f"Ошибка: {result.get('error', 'Unknown error')}"
 
     def load_available_models(self) -> Dict:
-        """Загрузка списка доступных моделей"""
         result = self._make_api_request("/models/available")
         if result.get("status") == "success":
             self.available_models = result.get("available_models", {})
-            return result
         return result
 
     def load_trained_models(self) -> Dict:
-        """Загрузка списка обученных моделей"""
         result = self._make_api_request("/models")
         if result.get("status") == "success":
             self.current_models = result.get("models", [])
         return result
 
     def load_datasets(self) -> Dict:
-        """Загрузка списка датасетов"""
         result = self._make_api_request("/datasets")
         if result.get("status") == "success":
             self.datasets = result.get("datasets", [])
         return result
 
     def train_model_interface(self, model_type: str, dataset_name: str, hyperparameters_json: str) -> str:
-        """Интерфейс для обучения модели с выбором датасета"""
         try:
-            # Парсим JSON с гиперпараметрами
-            if hyperparameters_json.strip():
-                hyperparameters = json.loads(hyperparameters_json)
-            else:
-                hyperparameters = {}
+            if not model_type:
+                return "Выберите тип модели"
 
-            # Отправляем запрос на обучение
+            hyperparameters = json.loads(hyperparameters_json) if hyperparameters_json.strip() else {}
+
             result = self._make_api_request(
                 "/models/train",
                 "POST",
                 {
                     "model_type": model_type,
                     "dataset_name": dataset_name,
-                    "hyperparameters": hyperparameters
-                }
+                    "hyperparameters": hyperparameters,
+                },
             )
 
             if result.get("status") == "success":
@@ -102,15 +117,15 @@ class MLDashboard:
                 clearml_id = result.get("clearml_task_id")
                 dataset_info = result.get("dataset_info", "")
 
-                response = f"Модель успешно обучена!\n"
+                response = "Модель успешно обучена!\n"
                 response += f"ID: {model_id}\n"
                 response += f"Accuracy: {accuracy:.4f}\n"
                 response += f"Датасет: {dataset_info}\n"
                 if clearml_id:
                     response += f"ClearML Task: {clearml_id}\n"
                 return response
-            else:
-                return f"Ошибка обучения: {result.get('error', 'Unknown error')}"
+
+            return f"Ошибка обучения: {result.get('error', 'Unknown error')}"
 
         except json.JSONDecodeError as e:
             return f"Ошибка в формате JSON: {str(e)}"
@@ -118,30 +133,29 @@ class MLDashboard:
             return f"Неожиданная ошибка: {str(e)}"
 
     def predict_interface(self, model_id: str, input_data_json: str) -> str:
-        """Интерфейс для предсказания"""
         try:
-            # Парсим JSON с данными для предсказания
+            if not model_id:
+                return "Выберите модель для предсказания"
+
             if not input_data_json.strip():
                 return "Введите данные для предсказания в формате JSON"
 
             input_data = json.loads(input_data_json)
 
-            # Проверяем формат данных
             if not isinstance(input_data, list) or not all(isinstance(row, list) for row in input_data):
                 return "Данные должны быть списком списков (2D массив)"
 
-            # Отправляем запрос на предсказание
             result = self._make_api_request(
                 f"/models/{model_id}/predict",
                 "POST",
-                {"data": input_data}
+                {"data": input_data},
             )
 
             if result.get("status") == "success":
                 predictions = result.get("predictions", [])
                 return f"Предсказания: {predictions}"
-            else:
-                return f"Ошибка предсказания: {result.get('error', 'Unknown error')}"
+
+            return f"Ошибка предсказания: {result.get('error', 'Unknown error')}"
 
         except json.JSONDecodeError as e:
             return f"Ошибка в формате JSON: {str(e)}"
@@ -149,7 +163,6 @@ class MLDashboard:
             return f"Неожиданная ошибка: {str(e)}"
 
     def delete_model_interface(self, model_id: str) -> str:
-        """Интерфейс для удаления модели"""
         if not model_id:
             return "Выберите модель для удаления"
 
@@ -157,42 +170,36 @@ class MLDashboard:
 
         if result.get("status") == "success":
             return f"Модель {model_id} успешно удалена"
-        else:
-            return f"Ошибка удаления: {result.get('error', 'Unknown error')}"
+
+        return f"Ошибка удаления: {result.get('error', 'Unknown error')}"
 
     def retrain_model_interface(self, model_id: str, dataset_name: str, hyperparameters_json: str) -> str:
-        """Интерфейс для переобучения модели с выбором датасета"""
         try:
             if not model_id:
                 return "Выберите модель для переобучения"
 
-            # Парсим JSON с гиперпараметрами
-            if hyperparameters_json.strip():
-                hyperparameters = json.loads(hyperparameters_json)
-            else:
-                hyperparameters = {}
+            hyperparameters = json.loads(hyperparameters_json) if hyperparameters_json.strip() else {}
 
-            # Отправляем запрос на переобучение
             result = self._make_api_request(
                 f"/models/{model_id}/retrain",
-                "PUT",
+                "POST",
                 {
                     "dataset_name": dataset_name,
-                    "hyperparameters": hyperparameters
-                }
+                    "hyperparameters": hyperparameters,
+                },
             )
 
             if result.get("status") == "success":
                 accuracy = result.get("train_accuracy", 0)
                 clearml_id = result.get("clearml_task_id")
 
-                response = f"Модель успешно переобучена!\n"
+                response = "Модель успешно переобучена!\n"
                 response += f"Accuracy: {accuracy:.4f}\n"
                 if clearml_id:
                     response += f"ClearML Task: {clearml_id}\n"
                 return response
-            else:
-                return f"Ошибка переобучения: {result.get('error', 'Unknown error')}"
+
+            return f"Ошибка переобучения: {result.get('error', 'Unknown error')}"
 
         except json.JSONDecodeError as e:
             return f"Ошибка в формате JSON: {str(e)}"
@@ -200,7 +207,6 @@ class MLDashboard:
             return f"Неожиданная ошибка: {str(e)}"
 
     def get_model_info_interface(self, model_id: str) -> str:
-        """Информация о модели"""
         if not model_id:
             return "Выберите модель для просмотра информации"
 
@@ -211,45 +217,44 @@ class MLDashboard:
             info += f"Тип: {result.get('model_type')}\n"
             info += f"Обучена: {'Да' if result.get('is_trained') else 'Нет'}"
             return info
-        else:
-            return f"Ошибка: {result.get('error', 'Unknown error')}"
+
+        return f"Ошибка: {result.get('error', 'Unknown error')}"
 
     def pull_dataset_interface(self, dataset_name: str) -> str:
-        """Обновление датасета из DVC"""
         if not dataset_name:
             return "Выберите датасет для обновления"
 
+        # Пробуем оба варианта роутов для совместимости
         result = self._make_api_request(f"/datasets/{dataset_name}/pull", "POST")
+        if result.get("status") != "success":
+            result = self._make_api_request(f"/datasets/{dataset_name}/update", "POST")
 
         if result.get("status") == "success":
-            return f"Датасет {dataset_name} обновлен из DVC"
-        else:
-            return f"Ошибка обновления: {result.get('error', 'Unknown error')}"
+            return result.get("message", f"Датасет {dataset_name} обновлен из DVC")
+
+        return f"Ошибка обновления: {result.get('error', 'Unknown error')}"
 
     def get_dataset_info_interface(self, dataset_name: str) -> str:
-        """Информация о датасете"""
         if not dataset_name:
             return "Выберите датасет для просмотра информации"
 
         result = self._make_api_request(f"/datasets/{dataset_name}")
 
         if result.get("status") == "success":
-            info = f"Датасет: {result.get('name')}\n"
-            info += f"Размер: {result.get('shape', [0, 0])[0]} строк, {result.get('shape', [0, 0])[1]} колонок\n"
+            shape = result.get("shape", [0, 0])
+            info = f"Датасет: {result.get('name', dataset_name)}\n"
+            info += f"Размер: {shape[0]} строк, {shape[1]} колонок\n"
             info += f"Колонки: {', '.join(result.get('columns', []))}\n"
             info += f"Описание: {result.get('description', '')}"
             return info
-        else:
-            return f"Ошибка: {result.get('error', 'Unknown error')}"
+
+        return f"Ошибка: {result.get('error', 'Unknown error')}"
 
     def create_dashboard(self) -> gr.Blocks:
-        """Создание интерфейса"""
-
         with gr.Blocks(title="ML Model Dashboard") as dashboard:
             gr.Markdown("# ML Model Dashboard")
             gr.Markdown("Дашборд для управления ML моделями через REST API с DVC и ClearML")
 
-            # Вкладки
             with gr.Tab("Обзор"):
                 with gr.Row():
                     with gr.Column():
@@ -272,31 +277,29 @@ class MLDashboard:
                         model_dropdown = gr.Dropdown(
                             choices=[],
                             label="Тип модели",
-                            info="Выберите тип модели для обучения"
+                            info="Выберите тип модели для обучения",
                         )
                         dataset_dropdown_train = gr.Dropdown(
                             choices=[],
                             label="Датасет для обучения",
-                            info="Выберите датасет из DVC"
+                            info="Выберите датасет из DVC",
                         )
                         hyperparameters_json = gr.Textbox(
                             label="Гиперпараметры (JSON)",
                             placeholder='{"C": 0.1, "max_iter": 100}',
-                            lines=3
+                            lines=3,
                         )
                         train_btn = gr.Button("Обучить модель", variant="primary")
 
                     with gr.Column():
                         gr.Markdown("### Доступные модели")
-                        available_models_json = gr.JSON(
-                            label="Информация о моделях"
-                        )
+                        available_models_json = gr.JSON(label="Информация о моделях")
 
                 with gr.Row():
                     train_output = gr.Textbox(
                         label="Результат обучения",
                         interactive=False,
-                        lines=6
+                        lines=6,
                     )
 
             with gr.Tab("Предсказание"):
@@ -306,12 +309,12 @@ class MLDashboard:
                         trained_models_dropdown = gr.Dropdown(
                             choices=[],
                             label="Обученные модели",
-                            info="Выберите модель для предсказания"
+                            info="Выберите модель для предсказания",
                         )
                         predict_input = gr.Textbox(
                             label="Данные для предсказания (JSON)",
-                            placeholder='[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]',
-                            lines=4
+                            placeholder="[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]",
+                            lines=4,
                         )
                         predict_btn = gr.Button("Получить предсказание", variant="primary")
 
@@ -321,14 +324,14 @@ class MLDashboard:
                         model_info_output = gr.Textbox(
                             label="Информация о модели",
                             interactive=False,
-                            lines=5
+                            lines=5,
                         )
 
                 with gr.Row():
                     predict_output = gr.Textbox(
                         label="Результат предсказания",
                         interactive=False,
-                        lines=3
+                        lines=3,
                     )
 
             with gr.Tab("Управление моделями"):
@@ -337,17 +340,17 @@ class MLDashboard:
                         gr.Markdown("### Переобучение модели")
                         retrain_model_dropdown = gr.Dropdown(
                             choices=[],
-                            label="Модель для переобучения"
+                            label="Модель для переобучения",
                         )
                         dataset_dropdown_retrain = gr.Dropdown(
                             choices=[],
                             label="Датасет для переобучения",
-                            info="Выберите датасет из DVC"
+                            info="Выберите датасет из DVC",
                         )
                         retrain_hyperparams = gr.Textbox(
                             label="Новые гиперпараметры (JSON)",
                             placeholder='{"C": 0.5, "max_iter": 200}',
-                            lines=2
+                            lines=2,
                         )
                         retrain_btn = gr.Button("Переобучить модель")
                         retrain_output = gr.Textbox(label="Результат", interactive=False, lines=4)
@@ -356,7 +359,7 @@ class MLDashboard:
                         gr.Markdown("### Удаление модели")
                         delete_model_dropdown = gr.Dropdown(
                             choices=[],
-                            label="Модель для удаления"
+                            label="Модель для удаления",
                         )
                         delete_btn = gr.Button("Удалить модель", variant="stop")
                         delete_output = gr.Textbox(label="Результат", interactive=False)
@@ -374,7 +377,7 @@ class MLDashboard:
                         gr.Markdown("### Управление датасетами")
                         dataset_info_dropdown = gr.Dropdown(
                             choices=[],
-                            label="Выберите датасет"
+                            label="Выберите датасет",
                         )
                         with gr.Row():
                             dataset_info_btn = gr.Button("Информация о датасете")
@@ -382,139 +385,266 @@ class MLDashboard:
                         dataset_info_output = gr.Textbox(
                             label="Информация о датасете",
                             interactive=False,
-                            lines=6
+                            lines=6,
                         )
-                        gr.Markdown("""
-                        **DVC Интеграция:**
-                        - Датасеты версионируются через DVC
-                        - Хранятся в MinIO (S3)
-                        - Автоматическое обновление
-                        """)
+                        gr.Markdown(
+                            """
+                            **DVC Интеграция:**
+                            - Датасеты версионируются через DVC
+                            - Хранятся в MinIO (S3)
+                            - Автоматическое обновление
+                            """
+                        )
 
-            # Обработчики событий
             def refresh_all_data():
-                """Обновление всех данных"""
-                # Загружаем доступные модели
                 models_result = self.load_available_models()
-                model_choices = list(models_result.get("available_models", {}).keys()) if models_result.get(
-                    "status") == "success" else []
+                model_choices = (
+                    list(models_result.get("available_models", {}).keys())
+                    if models_result.get("status") == "success"
+                    else []
+                )
 
-                # Загружаем обученные модели
                 trained_result = self.load_trained_models()
-                trained_choices = [model["model_id"] for model in
-                                   trained_result.get("models", [])] if trained_result.get(
-                    "status") == "success" else []
+                trained_models = (
+                    trained_result.get("models", [])
+                    if trained_result.get("status") == "success"
+                    else []
+                )
+                trained_choices = self._extract_model_choices(trained_models)
 
-                # Загружаем датасеты
                 datasets_result = self.load_datasets()
-                dataset_names = [dataset.get('name', '') for dataset in
-                                 datasets_result.get('datasets', [])] if datasets_result.get(
-                    'status') == 'success' else []
+                dataset_list = (
+                    datasets_result.get("datasets", [])
+                    if datasets_result.get("status") == "success"
+                    else []
+                )
+                dataset_names = self._extract_dataset_names(dataset_list)
 
-                # Статистика
-                models_count_text = f"{len(trained_choices)} моделей"
+                models_count_text = f"{len(trained_models)} моделей"
                 datasets_count_text = f"{len(dataset_names)} датасетов"
 
+                default_model_value = trained_choices[0][1] if trained_choices else None
+                default_dataset_value = dataset_names[0] if dataset_names else None
+
                 return {
-                    model_dropdown: gr.update(choices=model_choices),
-                    trained_models_dropdown: gr.update(choices=trained_choices),
-                    retrain_model_dropdown: gr.update(choices=trained_choices),
-                    delete_model_dropdown: gr.update(choices=trained_choices),
-                    dataset_dropdown_train: gr.update(choices=dataset_names),
-                    dataset_dropdown_retrain: gr.update(choices=dataset_names),
-                    dataset_info_dropdown: gr.update(choices=dataset_names),
+                    model_dropdown: gr.update(
+                        choices=model_choices,
+                        value=model_choices[0] if model_choices else None,
+                    ),
+                    trained_models_dropdown: gr.update(
+                        choices=trained_choices,
+                        value=default_model_value,
+                    ),
+                    retrain_model_dropdown: gr.update(
+                        choices=trained_choices,
+                        value=default_model_value,
+                    ),
+                    delete_model_dropdown: gr.update(
+                        choices=trained_choices,
+                        value=default_model_value,
+                    ),
+                    dataset_dropdown_train: gr.update(
+                        choices=dataset_names,
+                        value=default_dataset_value,
+                    ),
+                    dataset_dropdown_retrain: gr.update(
+                        choices=dataset_names,
+                        value=default_dataset_value,
+                    ),
+                    dataset_info_dropdown: gr.update(
+                        choices=dataset_names,
+                        value=default_dataset_value,
+                    ),
                     available_models_json: models_result.get("available_models", {}),
-                    datasets_display: datasets_result.get("datasets", []),
+                    datasets_display: dataset_list,
                     models_count: models_count_text,
-                    datasets_count: datasets_count_text
+                    datasets_count: datasets_count_text,
                 }
 
-            # Привязка обработчиков
+            def refresh_datasets_only():
+                datasets_result = self.load_datasets()
+                dataset_list = (
+                    datasets_result.get("datasets", [])
+                    if datasets_result.get("status") == "success"
+                    else []
+                )
+                dataset_names = self._extract_dataset_names(dataset_list)
+                default_dataset_value = dataset_names[0] if dataset_names else None
+
+                return {
+                    datasets_display: dataset_list,
+                    dataset_dropdown_train: gr.update(
+                        choices=dataset_names,
+                        value=default_dataset_value,
+                    ),
+                    dataset_dropdown_retrain: gr.update(
+                        choices=dataset_names,
+                        value=default_dataset_value,
+                    ),
+                    dataset_info_dropdown: gr.update(
+                        choices=dataset_names,
+                        value=default_dataset_value,
+                    ),
+                    datasets_count: f"{len(dataset_names)} датасетов",
+                }
+
             status_btn.click(
                 fn=self.health_check,
-                outputs=status_output
+                outputs=status_output,
             )
 
             refresh_btn.click(
                 fn=refresh_all_data,
                 outputs=[
-                    model_dropdown, trained_models_dropdown, retrain_model_dropdown,
-                    delete_model_dropdown, dataset_dropdown_train, dataset_dropdown_retrain,
-                    dataset_info_dropdown, available_models_json, datasets_display,
-                    models_count, datasets_count
-                ]
+                    model_dropdown,
+                    trained_models_dropdown,
+                    retrain_model_dropdown,
+                    delete_model_dropdown,
+                    dataset_dropdown_train,
+                    dataset_dropdown_retrain,
+                    dataset_info_dropdown,
+                    available_models_json,
+                    datasets_display,
+                    models_count,
+                    datasets_count,
+                ],
             )
 
             refresh_datasets_btn.click(
-                fn=lambda: self.load_datasets(),
-                outputs=datasets_display
+                fn=refresh_datasets_only,
+                outputs=[
+                    datasets_display,
+                    dataset_dropdown_train,
+                    dataset_dropdown_retrain,
+                    dataset_info_dropdown,
+                    datasets_count,
+                ],
             )
 
             train_btn.click(
                 fn=self.train_model_interface,
                 inputs=[model_dropdown, dataset_dropdown_train, hyperparameters_json],
-                outputs=train_output
+                outputs=train_output,
+            ).then(
+                fn=refresh_all_data,
+                outputs=[
+                    model_dropdown,
+                    trained_models_dropdown,
+                    retrain_model_dropdown,
+                    delete_model_dropdown,
+                    dataset_dropdown_train,
+                    dataset_dropdown_retrain,
+                    dataset_info_dropdown,
+                    available_models_json,
+                    datasets_display,
+                    models_count,
+                    datasets_count,
+                ],
             )
 
             predict_btn.click(
                 fn=self.predict_interface,
                 inputs=[trained_models_dropdown, predict_input],
-                outputs=predict_output
+                outputs=predict_output,
             )
 
             model_info_btn.click(
                 fn=self.get_model_info_interface,
                 inputs=[trained_models_dropdown],
-                outputs=model_info_output
+                outputs=model_info_output,
             )
 
             retrain_btn.click(
                 fn=self.retrain_model_interface,
                 inputs=[retrain_model_dropdown, dataset_dropdown_retrain, retrain_hyperparams],
-                outputs=retrain_output
+                outputs=retrain_output,
+            ).then(
+                fn=refresh_all_data,
+                outputs=[
+                    model_dropdown,
+                    trained_models_dropdown,
+                    retrain_model_dropdown,
+                    delete_model_dropdown,
+                    dataset_dropdown_train,
+                    dataset_dropdown_retrain,
+                    dataset_info_dropdown,
+                    available_models_json,
+                    datasets_display,
+                    models_count,
+                    datasets_count,
+                ],
             )
 
             delete_btn.click(
                 fn=self.delete_model_interface,
                 inputs=[delete_model_dropdown],
-                outputs=delete_output
+                outputs=delete_output,
+            ).then(
+                fn=refresh_all_data,
+                outputs=[
+                    model_dropdown,
+                    trained_models_dropdown,
+                    retrain_model_dropdown,
+                    delete_model_dropdown,
+                    dataset_dropdown_train,
+                    dataset_dropdown_retrain,
+                    dataset_info_dropdown,
+                    available_models_json,
+                    datasets_display,
+                    models_count,
+                    datasets_count,
+                ],
             )
 
             dataset_info_btn.click(
                 fn=self.get_dataset_info_interface,
                 inputs=[dataset_info_dropdown],
-                outputs=dataset_info_output
+                outputs=dataset_info_output,
             )
 
             dataset_pull_btn.click(
                 fn=self.pull_dataset_interface,
                 inputs=[dataset_info_dropdown],
-                outputs=dataset_info_output
+                outputs=dataset_info_output,
+            ).then(
+                fn=refresh_datasets_only,
+                outputs=[
+                    datasets_display,
+                    dataset_dropdown_train,
+                    dataset_dropdown_retrain,
+                    dataset_info_dropdown,
+                    datasets_count,
+                ],
             )
 
-            # Инициализация данных при загрузке
             dashboard.load(
                 fn=refresh_all_data,
                 outputs=[
-                    model_dropdown, trained_models_dropdown, retrain_model_dropdown,
-                    delete_model_dropdown, dataset_dropdown_train, dataset_dropdown_retrain,
-                    dataset_info_dropdown, available_models_json, datasets_display,
-                    models_count, datasets_count
-                ]
+                    model_dropdown,
+                    trained_models_dropdown,
+                    retrain_model_dropdown,
+                    delete_model_dropdown,
+                    dataset_dropdown_train,
+                    dataset_dropdown_retrain,
+                    dataset_info_dropdown,
+                    available_models_json,
+                    datasets_display,
+                    models_count,
+                    datasets_count,
+                ],
             )
 
         return dashboard
 
 
 def main():
-    """Запуск дашборда"""
     dashboard = MLDashboard()
     app = dashboard.create_dashboard()
     app.launch(
         server_name="0.0.0.0",
         server_port=7860,
         share=False,
-        show_error=True
+        show_error=True,
     )
 
 

@@ -4,7 +4,7 @@ from typing import AsyncGenerator, Dict, Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.logger import setup_logger
+from app.utils.logger import setup_logger
 from app.api.endpoints import health_router, models_router, datasets_router
 
 logger = setup_logger()

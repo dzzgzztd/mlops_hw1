@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   ml-api:
     build:
@@ -13,7 +11,26 @@ services:
       - ./logs:/app/logs
       - ./data:/app/data
     environment:
-      - PYTHONPATH=/app
+      PYTHONPATH: /app
+
+      CLEARML_API_HOST: http://apiserver:8008
+      CLEARML_WEB_HOST: http://webserver:80
+      CLEARML_FILES_HOST: http://fileserver:8081
+      CLEARML_PROJECT: ML-Service
+      CLEARML_OUTPUT_URI: s3://clearml-artifacts
+      CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY}
+      CLEARML_API_SECRET_KEY: ${CLEARML_API_SECRET_KEY}
+
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_DEFAULT_REGION: us-east-1
+      S3_ENDPOINT_URL: http://minio:9000
+      DVC_S3_BUCKET: dvc-storage
+    depends_on:
+      - minio
+      - apiserver
+      - fileserver
+      - webserver
     restart: unless-stopped
 
   ml-dashboard:
@@ -24,7 +41,7 @@ services:
     ports:
       - "7860:7860"
     environment:
-      - API_BASE_URL=http://ml-api:8000/api/v1
+      API_BASE_URL: http://ml-api:8000/api/v1
     depends_on:
       - ml-api
     restart: unless-stopped
@@ -36,75 +53,122 @@ services:
       - "9000:9000"
       - "9001:9001"
     environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
     restart: unless-stopped
 
-  mongodb:
-    image: mongo:4.4
-    container_name: mongodb
+  mongo:
+    image: mongo:8.0.15
+    container_name: clearml-mongo
+    command: --setParameter internalQueryMaxBlockingSortMemoryUsageBytes=196100200
     volumes:
-      - mongodb_data:/data/db
+      - clearml_mongo_db:/data/db
+      - clearml_mongo_cfg:/data/configdb
     restart: unless-stopped
 
   redis:
-    image: redis:6-alpine
-    container_name: redis
+    image: redis:8.2.3
+    container_name: clearml-redis
     volumes:
-      - redis_data:/data
+      - clearml_redis:/data
     restart: unless-stopped
 
-  clearml-apiserver:
-    image: allegroai/clearml:latest
-    container_name: clearml-apiserver
-    ports:
-      - "8008:8008"
+  elasticsearch:
+    image: elasticsearch:8.19.9
+    container_name: clearml-elastic
     environment:
-      - CLEARML_API_HOST=0.0.0.0:8008
-      - CLEARML_FILES_HOST=clearml-fileserver:8081
-      - CLEARML_WEB_HOST=clearml-webserver:8080
-    depends_on:
-      - mongodb
-      - redis
-    command: ["clearml-apiserver"]
+      bootstrap.memory_lock: "true"
+      discovery.type: "single-node"
+      xpack.security.enabled: "false"
+      cluster.name: clearml
+      node.name: clearml
+      http.compression_level: "7"
+      cluster.routing.allocation.node_initial_primaries_recoveries: "500"
+      cluster.routing.allocation.disk.watermark.low: 500mb
+      cluster.routing.allocation.disk.watermark.high: 500mb
+      cluster.routing.allocation.disk.watermark.flood_stage: 500mb
+      reindex.remote.whitelist: "'*.*'"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - clearml_elastic:/usr/share/elasticsearch/data
     restart: unless-stopped
 
-  clearml-webserver:
-    image: allegroai/clearml:latest
-    container_name: clearml-webserver
-    ports:
-      - "8080:8080"
-    environment:
-      - CLEARML_API_HOST=clearml-apiserver:8008
-      - CLEARML_FILES_HOST=clearml-fileserver:8081
-      - CLEARML_WEB_HOST=0.0.0.0:8080
-    depends_on:
-      - mongodb
-      - redis
-      - clearml-apiserver
-    command: ["clearml-webserver"]
-    restart: unless-stopped
-
-  clearml-fileserver:
-    image: allegroai/clearml:latest
+  fileserver:
+    image: clearml/server:latest
     container_name: clearml-fileserver
+    command:
+      - fileserver
+    environment:
+      CLEARML__fileserver__delete__allow_batch: "true"
+    volumes:
+      - clearml_logs:/var/log/clearml
+      - clearml_fileserver:/mnt/fileserver
+      - clearml_config:/opt/clearml/config
     ports:
       - "8081:8081"
-    environment:
-      - CLEARML_API_HOST=clearml-apiserver:8008
-      - CLEARML_FILES_HOST=0.0.0.0:8081
-      - CLEARML_WEB_HOST=clearml-webserver:8080
     depends_on:
-      - mongodb
+      - mongo
       - redis
-      - clearml-apiserver
-    command: ["clearml-fileserver"]
+      - elasticsearch
+    restart: unless-stopped
+
+  apiserver:
+    image: clearml/server:latest
+    container_name: clearml-apiserver
+    command:
+      - apiserver
+    environment:
+      CLEARML_ELASTIC_SERVICE_HOST: elasticsearch
+      CLEARML_ELASTIC_SERVICE_PORT: 9200
+      CLEARML_MONGODB_SERVICE_HOST: mongo
+      CLEARML_MONGODB_SERVICE_PORT: 27017
+      CLEARML_REDIS_SERVICE_HOST: redis
+      CLEARML_REDIS_SERVICE_PORT: 6379
+      CLEARML_SERVER_DEPLOYMENT_TYPE: linux
+      CLEARML__apiserver__pre_populate__enabled: "true"
+      CLEARML__apiserver__pre_populate__zip_files: "/opt/clearml/db-pre-populate"
+      CLEARML__apiserver__pre_populate__artifacts_path: "/mnt/fileserver"
+      CLEARML__services__async_urls_delete__enabled: "true"
+      CLEARML__services__async_urls_delete__fileserver__url_prefixes: '["http://fileserver:8081"]'
+    volumes:
+      - clearml_logs:/var/log/clearml
+      - clearml_config:/opt/clearml/config
+      - clearml_fileserver:/mnt/fileserver
+    ports:
+      - "8008:8008"
+    depends_on:
+      - redis
+      - mongo
+      - elasticsearch
+      - fileserver
+    restart: unless-stopped
+
+  webserver:
+    image: clearml/server:latest
+    container_name: clearml-webserver
+    command:
+      - webserver
+    depends_on:
+      - apiserver
+    ports:
+      - "8080:80"
     restart: unless-stopped
 
 volumes:
   minio_data:
-  mongodb_data:
-  redis_data:
+  clearml_logs:
+  clearml_config:
+  clearml_fileserver:
+  clearml_mongo_db:
+  clearml_mongo_cfg:
+  clearml_redis:
+  clearml_elastic:

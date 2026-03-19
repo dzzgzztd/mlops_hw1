@@ -1,3 +1,4 @@
+import os
 import gradio as gr
 import requests
 import json
@@ -7,7 +8,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-API_BASE_URL = "http://localhost:8000/api/v1"
+API_BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:8000/api/v1')
 
 
 class MLDashboard:
